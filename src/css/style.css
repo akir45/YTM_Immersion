@@ -75,7 +75,6 @@ body.ytm-custom-layout ytmusic-search-box {
     margin-bottom: 8px; 
     line-height: 1.2; 
     text-shadow: 0 4px 10px rgba(0,0,0,0.5); 
-    /* ★ タイトル改行の修正 */
     word-break: keep-all;
     overflow-wrap: break-word;
 }
@@ -168,7 +167,6 @@ body.ytm-custom-layout ytmusic-search-box {
   flex-direction: column;
   align-items: flex-start;
 }
-/* ★ 空行を非表示にする修正 */
 .lyric-line.empty-line {
     display: none;
 }
@@ -390,4 +388,35 @@ body.ytm-custom-layout ytmusic-player-bar .content-info-wrapper { display: none 
 }
 .ytm-confirm-btn.danger:hover {
     background: rgba(255, 61, 80, 1);
+}
+
+/* ★ タイムスタンプがない（静的歌詞）場合、すべてくっきり表示 */
+body.ytm-custom-layout.ytm-no-timestamp .lyric-line {
+    color: #fff;
+    filter: blur(0);
+    transform: scale(1);
+    opacity: 1;
+    cursor: default;
+    margin-bottom: 20px;
+    text-shadow: 0 0 10px rgba(0,0,0,0.3);
+}
+
+/* ★ メッセージ（Loading / No lyrics）をくっきり表示 */
+.no-lyrics-message, .lyric-loading {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 80%;
+    text-align: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 18px;
+    opacity: 1 !important; /* 強制的に不透明 */
+    text-shadow: 0 4px 15px rgba(0,0,0,0.6);
+}
+.no-lyrics-message a {
+    color: #3ea6ff;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(62, 166, 255, 0.3);
 }
