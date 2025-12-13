@@ -2,9 +2,7 @@ const CLOUD_STORAGE_KEY = 'dailyReplayCloudState';
 
 const DEFAULT_CLOUD_STATE = {
   serverBaseUrl: 'http://immersionproject.coreone.work',
-  // Discord ログインページのパス
   loginPath: '/auth/discord',
-  // 復活の呪文（サーバー側で発行される ID）
   recoveryToken: null,
   lastSyncAt: null,
   lastSyncInfo: null,
@@ -40,7 +38,6 @@ async function cloudSyncHistory(history) {
   const url = base + '/api/history';
 
   const payload = {
-    // ★サーバー側の history_api は "code" を見る
     code: state.recoveryToken,
     history: Array.isArray(history) ? history : [],
   };
@@ -135,17 +132,11 @@ const pickBestLrcLibHit = (items, artist) => {
     if (hit) return hit;
   }
 
-  hit = items.find(it => it.syncedLyrics || it.synced_lyrics);
-  if (hit) return hit;
-
-  hit = items.find(it => it.plainLyrics || it.plain_lyrics);
-  if (hit) return hit;
-
-  return items[0];
+  return null;
 };
 
 const fetchFromLrcLib = (track, artist) => {
-  if (!track) return Promise.resolve('');
+  if (!track) return Promise.resolve({ lyrics: '', candidates: [] });
   const url = `https://lrclib.net/api/search?track_name=${encodeURIComponent(track)}`;
   console.log('[BG] LrcLib search URL:', url);
 
@@ -154,21 +145,37 @@ const fetchFromLrcLib = (track, artist) => {
     .then(list => {
       console.log('[BG] LrcLib search result count:', Array.isArray(list) ? list.length : 'N/A');
       const items = Array.isArray(list) ? list : [];
+      
       const hit = pickBestLrcLibHit(items, artist);
-      if (!hit) return '';
+      
+      let bestLyrics = '';
+      if (hit) {
+        const synced = hit.syncedLyrics || hit.synced_lyrics || '';
+        const plain = hit.plainLyrics || hit.plain_lyrics || hit.plain_lyrics_text || '';
+        bestLyrics = (synced || plain || '').trim();
+      }
 
-      const synced = hit.syncedLyrics || hit.synced_lyrics || '';
-      const plain = hit.plainLyrics || hit.plain_lyrics || hit.plain_lyrics_text || '';
-      const lyrics = (synced || plain || '').trim();
-      console.log('[BG] LrcLib chosen track:', {
-        trackName: hit.trackName || hit.track || '',
-        artistName: hit.artistName || hit.artist || '',
-      });
-      return lyrics;
+      const candidates = items.map(item => {
+        const synced = item.syncedLyrics || item.synced_lyrics || '';
+        const plain = item.plainLyrics || item.plain_lyrics || item.plain_lyrics_text || '';
+        const txt = (synced || plain || '').trim();
+        if (!txt) return null;
+
+        return {
+          id: `lrclib_${item.id}`,
+          artist: item.artistName || item.artist,
+          title: item.trackName || item.trackName,
+          source: 'LrcLib',
+          has_synced: !!synced,
+          lyrics: txt
+        };
+      }).filter(Boolean);
+
+      return { lyrics: bestLyrics, candidates: candidates };
     })
     .catch(err => {
       console.error('[BG] LrcLib error:', err);
-      return '';
+      return { lyrics: '', candidates: [] };
     });
 };
 
@@ -205,8 +212,6 @@ const fetchCandidatesFromUrl = (url) => {
     console.warn('[BG] invalid candidates url:', url, e);
   }
 
-  console.log('[BG] fetchCandidatesFromUrl:', url);
-
   return fetch(url)
     .then(async (r) => {
       let json;
@@ -220,15 +225,6 @@ const fetchCandidatesFromUrl = (url) => {
       const list = Array.isArray(res.candidates) ? res.candidates : [];
       const config = res.config || null;
       const requests = Array.isArray(res.requests) ? res.requests : [];
-
-      console.log(
-        '[BG] candidates result:',
-        'status=', r.status,
-        'code=', res.code,
-        'candidates=', list.length,
-        'requests=', requests.length
-      );
-
       const hasSelectCandidates = list.length > 1;
 
       return {
@@ -258,7 +254,6 @@ const buildCandidatesUrl = (res, payloadVideoId) => {
       return u.toString();
     }
   } catch (e) {
-    console.warn('[BG] buildCandidatesUrl from api url failed:', e);
   }
 
   const vid = res.video_id || payloadVideoId;
@@ -286,7 +281,6 @@ const fetchFromLrchub = (track, artist, youtube_url, video_id) => {
 
       try {
         const json = JSON.parse(text);
-        console.log('[BG] Lyrics API JSON:', json);
         const res = json.response || json;
 
         hasSelectCandidates = !!res.has_select_candidates;
@@ -299,7 +293,6 @@ const fetchFromLrchub = (track, artist, youtube_url, video_id) => {
           res.dynamic_lyrics.lines.length
         ) {
           dynamicLines = res.dynamic_lyrics.lines;
-
           const lrcLines = dynamicLines
             .map(line => {
               let ms = null;
@@ -339,14 +332,8 @@ const fetchFromLrchub = (track, artist, youtube_url, video_id) => {
           return fetchCandidatesFromUrl(url).then(cRes => {
             candidates = cRes.candidates;
             hasSelectCandidates = !!(hasSelectCandidates || cRes.hasSelectCandidates);
-
-            if (cRes.config) {
-              config = cRes.config;
-            }
-
-            if (Array.isArray(cRes.requests) && cRes.requests.length) {
-              requests = cRes.requests;
-            }
+            if (cRes.config) config = cRes.config;
+            if (Array.isArray(cRes.requests) && cRes.requests.length) requests = cRes.requests;
 
             return {
               lyrics,
@@ -359,7 +346,6 @@ const fetchFromLrchub = (track, artist, youtube_url, video_id) => {
           });
         }
       } catch (e) {
-        console.warn('[BG] Lyrics API response parse failed', e);
       }
 
       return { lyrics, dynamicLines, hasSelectCandidates, candidates, config, requests };
@@ -369,14 +355,10 @@ const fetchFromLrchub = (track, artist, youtube_url, video_id) => {
 const fetchFromGithub = (video_id) => {
   if (!video_id) return Promise.resolve('');
   const url = `https://raw.githubusercontent.com/LRCHub/${video_id}/main/README.md`;
-  console.log('[BG] GitHub fallback URL:', url);
   return fetch(url)
     .then(r => (r.ok ? r.text() : ''))
     .then(text => (text || '').trim())
-    .catch(err => {
-      console.error('[BG] GitHub fallback error:', err);
-      return '';
-    });
+    .catch(err => '');
 };
 
 const extractVideoIdFromUrl = (youtube_url) => {
@@ -408,45 +390,29 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     return;
   }
 
-  // Cloud Sync 状態取得
   if (req.type === 'GET_CLOUD_STATE') {
     loadCloudState()
-      .then(state => {
-        sendResponse({ ok: true, state });
-      })
-      .catch(err => {
-        sendResponse({ ok: false, error: err && err.message ? err.message : String(err) });
-      });
+      .then(state => sendResponse({ ok: true, state }))
+      .catch(err => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
-  // 復活の呪文保存
   if (req.type === 'SAVE_RECOVERY_TOKEN') {
     const token = typeof req.token === 'string' ? req.token.trim() : '';
     saveCloudState({ recoveryToken: token || null })
-      .then(state => {
-        sendResponse({ ok: true, state });
-      })
-      .catch(err => {
-        sendResponse({ ok: false, error: err && err.message ? err.message : String(err) });
-      });
+      .then(state => sendResponse({ ok: true, state }))
+      .catch(err => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
-  // サーバーURL
   if (req.type === 'SET_SERVER_BASE_URL') {
     const url = typeof req.serverBaseUrl === 'string' ? req.serverBaseUrl.trim() : '';
     saveCloudState({ serverBaseUrl: url || DEFAULT_CLOUD_STATE.serverBaseUrl })
-      .then(state => {
-        sendResponse({ ok: true, state });
-      })
-      .catch(err => {
-        sendResponse({ ok: false, error: err && err.message ? err.message : String(err) });
-      });
+      .then(state => sendResponse({ ok: true, state }))
+      .catch(err => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
-  // ログインページ
   if (req.type === 'OPEN_LOGIN_PAGE') {
     (async () => {
       try {
@@ -455,48 +421,36 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         const loginPath = state.loginPath || DEFAULT_CLOUD_STATE.loginPath || '/auth/discord';
         const url = base + loginPath;
         chrome.tabs.create({ url }, () => {
-          const lastError = chrome.runtime.lastError;
-          if (lastError) {
-            sendResponse({ ok: false, error: lastError.message || String(lastError) });
-          } else {
-            sendResponse({ ok: true, url });
-          }
+          if (chrome.runtime.lastError) sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          else sendResponse({ ok: true, url });
         });
       } catch (e) {
-        sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+        sendResponse({ ok: false, error: String(e) });
       }
     })();
     return true;
   }
 
-  // 再生履歴のクラウド同期
   if (req.type === 'SYNC_HISTORY') {
-    const history =
-      Array.isArray(req.history)
-        ? req.history
-        : (req.payload && Array.isArray(req.payload.history) ? req.payload.history : []);
+    const history = Array.isArray(req.history) ? req.history : (req.payload && Array.isArray(req.payload.history) ? req.payload.history : []);
     (async () => {
       try {
         const result = await cloudSyncHistory(history);
         sendResponse(result);
       } catch (e) {
-        sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+        sendResponse({ ok: false, error: String(e) });
       }
     })();
     return true;
   }
 
-  // DeepL 翻訳
   if (req.type === 'TRANSLATE') {
     const { text, apiKey, targetLang } = req.payload;
     const endpoint = apiKey && apiKey.endsWith(':fx')
       ? 'https://api-free.deepl.com/v2/translate'
       : 'https://api.deepl.com/v2/translate';
 
-    const body = {
-      text,
-      target_lang: targetLang || 'JA',
-    };
+    const body = { text, target_lang: targetLang || 'JA' };
 
     fetch(endpoint, {
       method: 'POST',
@@ -508,10 +462,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     })
       .then(r => (r.ok ? r.json() : Promise.reject(r.statusText)))
       .then(data => sendResponse({ success: true, translations: data.translations }))
-      .catch(err => {
-        console.error('DeepL API Error:', err);
-        sendResponse({ success: false, error: err.toString() });
-      });
+      .catch(err => sendResponse({ success: false, error: err.toString() }));
 
     return true;
   }
@@ -520,144 +471,137 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
   if (req.type === 'GET_LYRICS') {
     const { track, artist, youtube_url, video_id } = req.payload || {};
 
-    console.log('[BG] GET_LYRICS', { track, artist, youtube_url, video_id });
+    console.log('[BG] GET_LYRICS (Parallel + Merge Candidates)', { track, artist });
 
     (async () => {
-      const timeoutMs = 90000;
-      let githubFallback = false;
+      const timeoutMs = 15000;
 
-      try {
-        let lrchubRes = null;
-        try {
-          lrchubRes = await withTimeout(
-            fetchFromLrchub(track, artist, youtube_url, video_id),
-            timeoutMs,
-            'lrchub_timeout'
-          );
-        } catch (e) {
-          console.error('[BG] LRCHub error or timeout:', e);
-        }
+      // 1. LRCHub
+      const pHub = withTimeout(
+        fetchFromLrchub(track, artist, youtube_url, video_id),
+        timeoutMs, 'lrchub'
+      ).then(res => ({ source: 'hub', data: res })).catch(e => ({ source: 'hub', error: e }));
 
-        if (lrchubRes && lrchubRes.lyrics && lrchubRes.lyrics.trim()) {
-          console.log(
-            '[BG] Using LRCHub lyrics (dynamic_lyrics:',
-            !!lrchubRes.dynamicLines,
-            'candidates:',
-            (lrchubRes.candidates || []).length,
-            ')'
-          );
-          sendResponse({
-            success: true,
-            lyrics: lrchubRes.lyrics,
-            dynamicLines: lrchubRes.dynamicLines || null,
-            hasSelectCandidates: lrchubRes.hasSelectCandidates || false,
-            candidates: lrchubRes.candidates || [],
-            config: lrchubRes.config || null,
-            requests: lrchubRes.requests || [],
-            githubFallback: false,
+      // 2. LrcLib
+      const pLib = withTimeout(
+        fetchFromLrcLib(track, artist),
+        timeoutMs, 'lrclib'
+      ).then(res => ({ source: 'lib', data: res })).catch(e => ({ source: 'lib', error: e }));
+
+      // 3. GitHub
+      const vidForGit = video_id || extractVideoIdFromUrl(youtube_url);
+      let pGit = Promise.resolve({ source: 'git', data: '' });
+      if (vidForGit) {
+        pGit = fetchFromGithub(vidForGit)
+          .then(res => ({ source: 'git', data: res }))
+          .catch(e => ({ source: 'git', error: e }));
+      }
+
+      const results = await Promise.all([pHub, pLib, pGit]);
+      
+      const hubRes = results.find(r => r.source === 'hub');
+      const libRes = results.find(r => r.source === 'lib');
+      const gitRes = results.find(r => r.source === 'git');
+
+      let sharedCandidates = [];
+      let sharedConfig = null;
+      let sharedRequests = [];
+      
+      if (hubRes && !hubRes.error && hubRes.data && Array.isArray(hubRes.data.candidates)) {
+          sharedCandidates.push(...hubRes.data.candidates);
+          if (hubRes.data.config) sharedConfig = hubRes.data.config;
+          if (Array.isArray(hubRes.data.requests)) sharedRequests = hubRes.data.requests;
+      }
+      
+      if (libRes && !libRes.error && libRes.data && Array.isArray(libRes.data.candidates)) {
+          const existingIds = new Set(sharedCandidates.map(c => c.id));
+          libRes.data.candidates.forEach(c => {
+              if (!existingIds.has(c.id)) {
+                  sharedCandidates.push(c);
+                  existingIds.add(c.id);
+              }
           });
-          return;
-        }
+      }
+      
+      const hasCandidates = sharedCandidates.length > 0;
 
-        let lrclibLyrics = '';
-        try {
-          lrclibLyrics = await withTimeout(
-            fetchFromLrcLib(track, artist),
-            timeoutMs,
-            'lrclib_timeout'
-          );
-        } catch (e) {
-          console.error('[BG] LrcLib error or timeout:', e);
-        }
-
-        if (lrclibLyrics && lrclibLyrics.trim()) {
-          console.log('[BG] Using LrcLib lyrics fallback');
-          sendResponse({
-            success: true,
-            lyrics: lrclibLyrics,
-            dynamicLines: null,
-            hasSelectCandidates: false,
-            candidates: [],
-            config: null,
-            requests: [],
-            githubFallback: false,
-          });
-          return;
-        }
-
-        const vidForGit = video_id || extractVideoIdFromUrl(youtube_url);
-        let gitLyrics = '';
-        if (vidForGit) {
-          gitLyrics = await fetchFromGithub(vidForGit);
-        }
-
-        if (gitLyrics && gitLyrics.trim()) {
-          githubFallback = true;
-          console.log('[BG] Using GitHub fallback lyrics');
-          sendResponse({
-            success: true,
-            lyrics: gitLyrics,
-            dynamicLines: null,
-            hasSelectCandidates: false,
-            candidates: [],
-            config: null,
-            requests: [],
-            githubFallback,
-          });
-          return;
-        }
-
-        console.log('[BG] No lyrics from any source');
+      // A. LRCHub
+      if (hubRes && !hubRes.error && hubRes.data && hubRes.data.lyrics && hubRes.data.lyrics.trim()) {
+        const d = hubRes.data;
+        console.log('[BG] Won: LRCHub');
         sendResponse({
-          success: false,
-          lyrics: '',
-          dynamicLines: null,
-          hasSelectCandidates: false,
-          candidates: [],
-          config: null,
-          requests: [],
+          success: true,
+          lyrics: d.lyrics,
+          dynamicLines: d.dynamicLines || null,
+          hasSelectCandidates: d.hasSelectCandidates || hasCandidates,
+          candidates: sharedCandidates,
+          config: d.config || null,
+          requests: d.requests || [],
           githubFallback: false,
         });
-      } catch (err) {
-        console.error('Lyrics API Error:', err);
-        sendResponse({ success: false, error: err.toString(), githubFallback: false });
+        return;
       }
+
+      // B. LrcLib
+      if (libRes && !libRes.error && libRes.data && libRes.data.lyrics && libRes.data.lyrics.trim()) {
+        console.log('[BG] Won: LrcLib');
+        sendResponse({
+          success: true,
+          lyrics: libRes.data.lyrics,
+          dynamicLines: null,
+          hasSelectCandidates: hasCandidates,
+          candidates: sharedCandidates,
+          config: sharedConfig,
+          requests: sharedRequests,
+          githubFallback: false,
+        });
+        return;
+      }
+
+      // C. GitHub
+      if (gitRes && !gitRes.error && gitRes.data && typeof gitRes.data === 'string' && gitRes.data.trim()) {
+        console.log('[BG] Won: GitHub');
+        sendResponse({
+          success: true,
+          lyrics: gitRes.data,
+          dynamicLines: null,
+          hasSelectCandidates: hasCandidates,
+          candidates: sharedCandidates,
+          config: sharedConfig,
+          requests: sharedRequests,
+          githubFallback: true,
+        });
+        return;
+      }
+
+      console.log('[BG] No lyrics found (Auto)');
+      sendResponse({
+        success: false,
+        lyrics: '',
+        dynamicLines: null,
+        hasSelectCandidates: hasCandidates,
+        candidates: sharedCandidates,
+      });
+
     })();
 
     return true;
   }
 
-  // 歌詞候補の選択 / ロック
   if (req.type === 'SELECT_LYRICS_CANDIDATE') {
-    const {
-      youtube_url,
-      video_id,
-      candidate_id,
-      request,
-      action,
-      lock,
-    } = req.payload || {};
-
+    const { youtube_url, video_id, candidate_id, request, action, lock } = req.payload || {};
     const body = {};
     if (youtube_url) body.youtube_url = youtube_url;
     else if (video_id) body.video_id = video_id;
     if (candidate_id) body.candidate_id = candidate_id;
     const reqKey = request || action;
     if (reqKey) body.request = reqKey;
-    if (typeof lock !== 'undefined') {
-      body.lock = String(lock);
-    }
+    if (typeof lock !== 'undefined') body.lock = String(lock);
 
-    if (!body.youtube_url && !body.video_id) {
-      sendResponse({ success: false, error: 'missing video_id or youtube_url' });
+    if ((!body.youtube_url && !body.video_id) || (!body.candidate_id && !body.request)) {
+      sendResponse({ success: false, error: 'missing params' });
       return;
     }
-    if (!body.candidate_id && !body.request) {
-      sendResponse({ success: false, error: 'missing candidate_id or request' });
-      return;
-    }
-
-    console.log('[BG] SELECT_LYRICS_CANDIDATE', body);
 
     fetch('https://lrchub.coreone.work/api/lyrics_select', {
       method: 'POST',
@@ -668,40 +612,25 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       .then(text => {
         try {
           const json = JSON.parse(text);
-          console.log('[BG] lyrics_select JSON:', json);
           sendResponse({ success: !!json.ok, raw: json });
         } catch (e) {
-          console.warn('[BG] lyrics_select non-JSON response');
           sendResponse({ success: false, error: 'Invalid JSON', raw: text });
         }
       })
-      .catch(err => {
-        console.error('SELECT_LYRICS_CANDIDATE Error:', err);
-        sendResponse({ success: false, error: err.toString() });
-      });
+      .catch(err => sendResponse({ success: false, error: err.toString() }));
 
     return true;
   }
 
-  // 翻訳取得
   if (req.type === 'GET_TRANSLATION') {
     const { youtube_url, video_id, lang, langs } = req.payload;
-
     try {
       const url = new URL('https://lrchub.coreone.work/api/translation');
-      if (youtube_url) {
-        url.searchParams.set('youtube_url', youtube_url);
-      } else if (video_id) {
-        url.searchParams.set('video_id', video_id);
-      }
+      if (youtube_url) url.searchParams.set('youtube_url', youtube_url);
+      else if (video_id) url.searchParams.set('video_id', video_id);
 
-      const reqLangs = Array.isArray(langs) && langs.length
-        ? langs
-        : (lang ? [lang] : []);
-
+      const reqLangs = Array.isArray(langs) && langs.length ? langs : (lang ? [lang] : []);
       reqLangs.forEach(l => url.searchParams.append('lang', l));
-
-      console.log('[BG] GET_TRANSLATION', url.toString());
 
       fetch(url.toString(), { method: 'GET' })
         .then(r => r.text())
@@ -710,7 +639,6 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
           let missing = [];
           try {
             const json = JSON.parse(text);
-            console.log('[BG] Translation API JSON:', json);
             const translations = json.translations || {};
             lrcMap = {};
             reqLangs.forEach(l => {
@@ -718,35 +646,19 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             });
             missing = json.missing_langs || [];
           } catch (e) {
-            console.warn('[BG] Translation API response is not JSON');
             lrcMap = {};
           }
-          Object.keys(lrcMap || {}).forEach(k => {
-            console.log(
-              `[BG] Translation[${k}] preview:`,
-              (lrcMap[k] || '').slice(0, 100)
-            );
-          });
           sendResponse({ success: true, lrcMap, missing });
         })
-        .catch(err => {
-          console.error('Translation API Error:', err);
-          sendResponse({ success: false, error: err.toString() });
-        });
+        .catch(err => sendResponse({ success: false, error: err.toString() }));
     } catch (e) {
-      console.error('GET_TRANSLATION build URL error:', e);
       sendResponse({ success: false, error: e.toString() });
     }
-
     return true;
   }
 
-  // 翻訳登録
   if (req.type === 'REGISTER_TRANSLATION') {
     const { youtube_url, video_id, lang, lyrics } = req.payload;
-
-    console.log('[BG] REGISTER_TRANSLATION', { youtube_url, video_id, lang });
-
     const body = { lang, lyrics };
     if (youtube_url) body.youtube_url = youtube_url;
     else if (video_id) body.video_id = video_id;
@@ -760,41 +672,28 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       .then(text => {
         try {
           const json = JSON.parse(text);
-          console.log('[BG] REGISTER_TRANSLATION JSON:', json);
           sendResponse({ success: !!json.ok, raw: json });
         } catch (e) {
-          console.warn('REGISTER_TRANSLATION non-JSON response');
           sendResponse({ success: false, error: 'Invalid JSON', raw: text });
         }
       })
-      .catch(err => {
-        console.error('REGISTER_TRANSLATION Error:', err);
-        sendResponse({ success: false, error: err.toString() });
-      });
+      .catch(err => sendResponse({ success: false, error: err.toString() }));
 
     return true;
   }
 
-  // 歌詞共有登録
   if (req.type === 'SHARE_REGISTER') {
     const { youtube_url, video_id, phrase, text, lang, time_ms, time_sec } = req.payload || {};
-    console.log('[BG] SHARE_REGISTER', { youtube_url, video_id, lang, time_ms, time_sec });
-
     const body = {};
     if (youtube_url) body.youtube_url = youtube_url;
     else if (video_id) body.video_id = video_id;
     if (phrase || text) body.phrase = phrase || text;
     if (lang) body.lang = lang;
-
     if (typeof time_ms === 'number') body.time_ms = time_ms;
     else if (typeof time_sec === 'number') body.time_sec = time_sec;
 
-    if (!body.youtube_url && !body.video_id) {
-      sendResponse({ success: false, error: 'missing video_id or youtube_url' });
-      return;
-    }
-    if (!body.phrase) {
-      sendResponse({ success: false, error: 'missing phrase' });
+    if ((!body.youtube_url && !body.video_id) || !body.phrase) {
+      sendResponse({ success: false, error: 'missing params' });
       return;
     }
 
@@ -807,17 +706,12 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       .then(text => {
         try {
           const json = JSON.parse(text);
-          console.log('[BG] SHARE_REGISTER JSON:', json);
           sendResponse({ success: !!json.ok, data: json });
         } catch (e) {
-          console.warn('[BG] SHARE_REGISTER non-JSON response');
           sendResponse({ success: false, error: 'Invalid JSON', raw: text });
         }
       })
-      .catch(err => {
-        console.error('SHARE_REGISTER Error:', err);
-        sendResponse({ success: false, error: err.toString() });
-      });
+      .catch(err => sendResponse({ success: false, error: err.toString() }));
 
     return true;
   }
